@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Orchestration Ratings</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{font-family:sans-serif;max-width:45rem;margin:2rem auto;padding:0 1rem}
+    section{margin-bottom:3rem}
+    h3{margin:0 0 .5rem}
+  </style>
+</head>
+<body>
+  <h1>Orchestration Ratings</h1>
+  <p>Select a score – 1 means “trash 😊”, 10 “exceptional”. Reload to see the next batch.</p>
+
+  <div id="list"></div>
+
+  <script>
+    /* fetch the current file list that build.js writes */
+    fetch('mp3s/list.json')
+      .then(r => r.json())
+      .then(files => {
+        const root = document.getElementById('list');
+        files.forEach(file => {
+          root.insertAdjacentHTML('beforeend', `
+            <section>
+              <h3>${file}</h3>
+              <audio controls preload="none" src="mp3s/${file}"></audio>
+              <form name="${file}" data-netlify="true">
+                <fieldset>
+                  <legend>Rate (1–10)</legend>
+                  ${Array.from({length:10}, (_,i)=>`
+                    <label>
+                      <input type="radio" name="score" value="${i+1}" required> ${i+1}
+                    </label>`).join(' ')}
+                </fieldset>
+                <button>Submit</button>
+              </form>
+            </section>
+          `);
+        });
+      });
+  </script>
+</body>
+</html>
