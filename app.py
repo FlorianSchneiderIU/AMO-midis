@@ -999,10 +999,8 @@ RATING_PAGE_HTML = """
                         <button type="submit" class="batch-submit-btn">Submit Ratings</button>
                         <p style="color: #718096; font-size: 0.9rem; margin-top: 10px;">Only tracks with ratings will be submitted</p>
                     </div>
-                </form>
-            {% endif %}
+                </form>            {% endif %}
         {% endif %}        
-        <a href="{{ url_for('upload') }}" class="nav-link">← Back to Upload Page</a>
     </div>
 
     <script>
