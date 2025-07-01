@@ -42,9 +42,12 @@ UPLOAD_FOLDER = Path(__file__).parent / "uploads"
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"mp3"}
+ALLOWED_PDF_EXTENSIONS = {"pdf"}
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "changeme")
 RATINGS_CSV = Path(__file__).parent / "ratings.csv"
 METADATA_CSV = Path(__file__).parent / "metadata.csv"
+SCORES_FOLDER = Path(__file__).parent / "scores"
+SCORES_FOLDER.mkdir(exist_ok=True)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max file size
@@ -57,6 +60,9 @@ app.config["UPLOAD_FOLDER"] = str(UPLOAD_FOLDER)
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def allowed_pdf_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_PDF_EXTENSIONS
+
 
 def save_rating(filename: str, score: int, ip: str, email: str, remark: str = "") -> None:
     new = not RATINGS_CSV.exists()
@@ -67,14 +73,14 @@ def save_rating(filename: str, score: int, ip: str, email: str, remark: str = ""
         writer.writerow([dt.datetime.utcnow().isoformat(), filename, score, ip, email, remark])
 
 
-def save_metadata(filename: str, model_name: str = "", composer: str = "", piece_name: str = "") -> None:
+def save_metadata(filename: str, model_name: str = "", composer: str = "", piece_name: str = "", score_filename: str = "") -> None:
     """Save metadata for an uploaded file."""
     new = not METADATA_CSV.exists()
     with METADATA_CSV.open("a", newline="") as f:
         writer = csv.writer(f)
         if new:
-            writer.writerow(["filename", "model_name", "composer", "piece_name", "upload_timestamp"])
-        writer.writerow([filename, model_name, composer, piece_name, dt.datetime.utcnow().isoformat()])
+            writer.writerow(["filename", "model_name", "composer", "piece_name", "score_filename", "upload_timestamp"])
+        writer.writerow([filename, model_name, composer, piece_name, score_filename, dt.datetime.utcnow().isoformat()])
 
 
 def get_file_metadata(filename: str) -> dict:
@@ -267,10 +273,13 @@ UPLOAD_FORM_HTML = """
             <div class="form-group">
                 <label for="model_name">Model Name (optional):</label>
                 <input type="text" id="model_name" name="model_name" placeholder="e.g., GPT-4, Claude, etc.">
-            </div>
-            <div class="form-group">
+            </div>            <div class="form-group">
                 <label for="file">Choose MP3 file:</label>
                 <input type="file" id="file" name="file" accept="audio/mpeg" required>
+            </div>
+            <div class="form-group">
+                <label for="score_file">Choose PDF Score (optional):</label>
+                <input type="file" id="score_file" name="score_file" accept="application/pdf">
             </div>
             <button type="submit">Upload File</button>
         </form>
@@ -293,23 +302,36 @@ def upload():
             message = "Incorrect password."
         else:
             file = request.files.get("file")
+            score_file = request.files.get("score_file")
             if not file or not file.filename:
-                message = "No file selected."
+                message = "No MP3 file selected."
             elif not allowed_file(file.filename):
-                message = "File type not allowed."
+                message = "MP3 file type not allowed."
+            elif score_file and score_file.filename and not allowed_pdf_file(score_file.filename):
+                message = "Score file must be a PDF."
             else:
                 filename = secure_filename(file.filename)
                 file.save(UPLOAD_FOLDER / filename)
+                
+                # Handle score file upload
+                score_filename = ""
+                if score_file and score_file.filename:
+                    score_filename = secure_filename(score_file.filename)
+                    # Ensure unique filename by prefixing with the MP3 filename (without extension)
+                    mp3_name = filename.rsplit(".", 1)[0]
+                    score_filename = f"{mp3_name}_{score_filename}"
+                    score_file.save(SCORES_FOLDER / score_filename)
                 
                 # Save metadata if any fields are provided
                 model_name = request.form.get("model_name", "").strip()
                 composer = request.form.get("composer", "").strip()
                 piece_name = request.form.get("piece_name", "").strip()
                 
-                if model_name or composer or piece_name:
-                    save_metadata(filename, model_name, composer, piece_name)
+                if model_name or composer or piece_name or score_filename:
+                    save_metadata(filename, model_name, composer, piece_name, score_filename)
                 
-                message = f"✔ Uploaded {filename}"
+                score_msg = f" and score {score_filename}" if score_filename else ""
+                message = f"✔ Uploaded {filename}{score_msg}"
     return render_template_string(UPLOAD_FORM_HTML, message=message)
 
 # ---------------------------------------------------------------------------
@@ -471,9 +493,35 @@ RATING_PAGE_HTML = """
             transform: scale(1.1);
             box-shadow: 0 6px 20px rgba(245, 87, 108, 0.4);
         }
-        
-        .jump-btn:active {
+          .jump-btn:active {
             transform: scale(0.95);
+        }
+        
+        .score-download-btn {
+            background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .score-download-btn:hover {
+            background: linear-gradient(135deg, #3182ce 0%, #2c5282 100%);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(66, 153, 225, 0.3);
+        }
+        
+        .score-download-btn:active {
+            transform: translateY(0);
         }
           .track-title {
             color: #2d3748;
@@ -844,8 +892,7 @@ RATING_PAGE_HTML = """
     {% if user_email and tracks %}
     <div class="filter-section">
         <h3 class="filter-title">🔍 Filter & Sort Tracks</h3>
-        <div class="filter-controls">
-            <div class="filter-group">
+        <div class="filter-controls">            <div class="filter-group">
                 <label class="filter-label" for="composer-filter">Composer:</label>
                 <select id="composer-filter" class="filter-select">
                     <option value="">All Composers</option>
@@ -858,18 +905,11 @@ RATING_PAGE_HTML = """
                 </select>
             </div>
             <div class="filter-group">
-                <label class="filter-label" for="model-filter">Model:</label>
-                <select id="model-filter" class="filter-select">
-                    <option value="">All Models</option>
-                </select>
-            </div>
-            <div class="filter-group">
                 <label class="filter-label" for="sort-by">Sort by:</label>
                 <select id="sort-by" class="filter-select">
                     <option value="filename">Filename</option>
                     <option value="composer">Composer</option>
                     <option value="piece">Piece Name</option>
-                    <option value="model">Model</option>
                 </select>
             </div>
         </div>
@@ -915,28 +955,29 @@ RATING_PAGE_HTML = """
                 <form method="post" id="batchRatingForm">
                     <input type="hidden" name="email" value="{{ user_email }}">
                     <input type="hidden" name="batch_submit" value="true">
-                      {% for t in tracks %}
-                    <div class="track-card" 
+                      {% for t in tracks %}                    <div class="track-card" 
                          data-filename="{{ t }}" 
                          data-composer="{{ track_metadata[t].get('composer', '') }}" 
-                         data-piece="{{ track_metadata[t].get('piece_name', '') }}" 
-                         data-model="{{ track_metadata[t].get('model_name', '') }}">
+                         data-piece="{{ track_metadata[t].get('piece_name', '') }}">
                         <button type="button" class="jump-btn" onclick="jumpToSubmit()" title="Jump to submit button">⬇</button>
                         <h3 class="track-title">{{ t }}</h3>
                         {% if track_metadata[t] %}
                         <div class="track-info">
                             {% if track_metadata[t].get('composer') %}
                             <div><span class="model-name">Composer: </span><span class="model-value">{{ track_metadata[t]['composer'] }}</span></div>
-                            {% endif %}
-                            {% if track_metadata[t].get('piece_name') %}
+                            {% endif %}                            {% if track_metadata[t].get('piece_name') %}
                             <div><span class="model-name">Piece: </span><span class="model-value">{{ track_metadata[t]['piece_name'] }}</span></div>
                             {% endif %}
-                            {% if track_metadata[t].get('model_name') %}
-                            <div><span class="model-name">Model: </span><span class="model-value">{{ track_metadata[t]['model_name'] }}</span></div>
-                            {% endif %}
-                        </div>
+                        </div>                        {% endif %}
+                        {% if track_metadata[t] and track_metadata[t].get('score_filename') %}
+                        <a href="{{ url_for('score_file', filename=track_metadata[t]['score_filename']) }}" 
+                           class="score-download-btn" 
+                           target="_blank"
+                           title="Download PDF score">
+                            📄 Download Score
+                        </a>
                         {% endif %}
-                        <audio controls preload="none" src="{{ url_for('uploaded_file', filename=t) }}"></audio>                        <div class="rating-form">
+                        <audio controls preload="none" src="{{ url_for('uploaded_file', filename=t) }}"></audio><div class="rating-form">
                             <input type="hidden" name="filenames" value="{{ t }}">
                             <div class="rating-section">
                                 <div class="rating-options">
@@ -968,22 +1009,17 @@ RATING_PAGE_HTML = """
         // Populate filter options when page loads
         document.addEventListener('DOMContentLoaded', function() {
             populateFilterOptions();
-        });
-
-        function populateFilterOptions() {
+        });        function populateFilterOptions() {
             const tracks = document.querySelectorAll('.track-card');
             const composers = new Set();
             const pieces = new Set();
-            const models = new Set();
 
             tracks.forEach(track => {
                 const composer = track.getAttribute('data-composer');
                 const piece = track.getAttribute('data-piece');
-                const model = track.getAttribute('data-model');
 
                 if (composer) composers.add(composer);
                 if (piece) pieces.add(piece);
-                if (model) models.add(model);
             });
 
             // Populate composer filter
@@ -1003,21 +1039,9 @@ RATING_PAGE_HTML = """
                 option.textContent = piece;
                 pieceSelect.appendChild(option);
             });
-
-            // Populate model filter
-            const modelSelect = document.getElementById('model-filter');
-            models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model;
-                option.textContent = model;
-                modelSelect.appendChild(option);
-            });
-        }
-
-        function applyFilters() {
+        }        function applyFilters() {
             const composerFilter = document.getElementById('composer-filter').value;
             const pieceFilter = document.getElementById('piece-filter').value;
-            const modelFilter = document.getElementById('model-filter').value;
             const sortBy = document.getElementById('sort-by').value;
 
             const tracks = Array.from(document.querySelectorAll('.track-card'));
@@ -1026,13 +1050,11 @@ RATING_PAGE_HTML = """
             tracks.forEach(track => {
                 const composer = track.getAttribute('data-composer') || '';
                 const piece = track.getAttribute('data-piece') || '';
-                const model = track.getAttribute('data-model') || '';
 
                 const matchesComposer = !composerFilter || composer === composerFilter;
                 const matchesPiece = !pieceFilter || piece === pieceFilter;
-                const matchesModel = !modelFilter || model === modelFilter;
 
-                if (matchesComposer && matchesPiece && matchesModel) {
+                if (matchesComposer && matchesPiece) {
                     track.classList.remove('hidden');
                 } else {
                     track.classList.add('hidden');
@@ -1048,14 +1070,9 @@ RATING_PAGE_HTML = """
                     case 'composer':
                         aValue = a.getAttribute('data-composer') || '';
                         bValue = b.getAttribute('data-composer') || '';
-                        break;
-                    case 'piece':
+                        break;                    case 'piece':
                         aValue = a.getAttribute('data-piece') || '';
                         bValue = b.getAttribute('data-piece') || '';
-                        break;
-                    case 'model':
-                        aValue = a.getAttribute('data-model') || '';
-                        bValue = b.getAttribute('data-model') || '';
                         break;
                     default:
                         aValue = a.getAttribute('data-filename') || '';
@@ -1081,12 +1098,9 @@ RATING_PAGE_HTML = """
             tracks.filter(track => track.classList.contains('hidden')).forEach(track => {
                 form.insertBefore(track, submitSection);
             });
-        }
-
-        function clearFilters() {
+        }        function clearFilters() {
             document.getElementById('composer-filter').value = '';
             document.getElementById('piece-filter').value = '';
-            document.getElementById('model-filter').value = '';
             document.getElementById('sort-by').value = 'filename';
             
             // Show all tracks
@@ -1095,7 +1109,7 @@ RATING_PAGE_HTML = """
             });
             
             applyFilters(); // Apply default sorting
-        }        // Auto-update piece filter when composer changes
+        }// Auto-update piece filter when composer changes
         const composerFilter = document.getElementById('composer-filter');
         if (composerFilter) {
             composerFilter.addEventListener('change', function() {
@@ -1345,11 +1359,15 @@ def rate():
     )
 
 # ---------------------------------------------------------------------------
-# Static serving of uploaded mp3s
+# Static serving of uploaded mp3s and PDF scores
 # ---------------------------------------------------------------------------
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+
+@app.route("/scores/<path:filename>")
+def score_file(filename):
+    return send_from_directory(str(SCORES_FOLDER), filename)
 
 # Redirect root → rating page
 @app.route("/")
