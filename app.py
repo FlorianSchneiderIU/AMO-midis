@@ -43,14 +43,10 @@ UPLOAD_FOLDER = Path(__file__).parent / "uploads"
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"mscz"}
-ALLOWED_EXTENSIONS = {"mp3"}
-ALLOWED_PDF_EXTENSIONS = {"pdf"}
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "changeme")
 MUSESCORE_BIN = os.environ.get("MUSESCORE_BIN", "musescore")
 RATINGS_CSV = Path(__file__).parent / "ratings.csv"
 METADATA_CSV = Path(__file__).parent / "metadata.csv"
-SCORES_FOLDER = Path(__file__).parent / "scores"
-SCORES_FOLDER.mkdir(exist_ok=True)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max file size
@@ -62,10 +58,6 @@ app.config["UPLOAD_FOLDER"] = str(UPLOAD_FOLDER)
 
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def allowed_pdf_file(filename: str) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_PDF_EXTENSIONS
-
 
 def save_rating(filename: str, score: int, ip: str, email: str, remark: str = "") -> None:
     new = not RATINGS_CSV.exists()
@@ -276,14 +268,11 @@ UPLOAD_FORM_HTML = """
             <div class="form-group">
                 <label for="model_name">Model Name (optional):</label>
                 <input type="text" id="model_name" name="model_name" placeholder="e.g., GPT-4, Claude, etc.">
-            </div>            <div class="form-group">
-                <label for="file">Choose MP3 file:</label>
-                <input type="file" id="file" name="file" accept="audio/mpeg" required>
             </div>
             <div class="form-group">
-                <label for="score_file">Choose PDF Score (optional):</label>
-                <input type="file" id="score_file" name="score_file" accept="application/pdf">
-            </div>
+                <label for="file">Choose MuseScore file:</label>
+                <input type="file" id="file" name="file" accept=".mscz" required>
+                </div>
             <button type="submit">Upload File</button>
         </form>
         {% if message %}
@@ -305,13 +294,10 @@ def upload():
             message = "Incorrect password."
         else:
             file = request.files.get("file")
-            score_file = request.files.get("score_file")
             if not file or not file.filename:
-                message = "No MP3 file selected."
+                message = "No score selected."
             elif not allowed_file(file.filename):
-                message = "MP3 file type not allowed."
-            elif score_file and score_file.filename and not allowed_pdf_file(score_file.filename):
-                message = "Score file must be a PDF."
+                message = "File type not allowed."
             else:
                 filename = secure_filename(file.filename)
                 mscz_path = UPLOAD_FOLDER / filename
@@ -326,7 +312,6 @@ def upload():
                 except Exception as e:
                     message = f"Conversion failed: {e}"
                 else:
-                    # Save metadata if any fields are provided
                     model_name = request.form.get("model_name", "").strip()
                     composer = request.form.get("composer", "").strip()
                     piece_name = request.form.get("piece_name", "").strip()
@@ -335,27 +320,6 @@ def upload():
                         save_metadata(ogg_path.name, model_name, composer, piece_name)
 
                     message = f"✔ Uploaded {filename}"
-                file.save(UPLOAD_FOLDER / filename)
-                
-                # Handle score file upload
-                score_filename = ""
-                if score_file and score_file.filename:
-                    score_filename = secure_filename(score_file.filename)
-                    # Ensure unique filename by prefixing with the MP3 filename (without extension)
-                    mp3_name = filename.rsplit(".", 1)[0]
-                    score_filename = f"{mp3_name}_{score_filename}"
-                    score_file.save(SCORES_FOLDER / score_filename)
-                
-                # Save metadata if any fields are provided
-                model_name = request.form.get("model_name", "").strip()
-                composer = request.form.get("composer", "").strip()
-                piece_name = request.form.get("piece_name", "").strip()
-                
-                if model_name or composer or piece_name or score_filename:
-                    save_metadata(filename, model_name, composer, piece_name, score_filename)
-                
-                score_msg = f" and score {score_filename}" if score_filename else ""
-                message = f"✔ Uploaded {filename}{score_msg}"
     return render_template_string(UPLOAD_FORM_HTML, message=message)
 
 # ---------------------------------------------------------------------------
@@ -1008,14 +972,12 @@ RATING_PAGE_HTML = """
                             <div><span class="model-name">Piece: </span><span class="model-value">{{ track_metadata[t]['piece_name'] }}</span></div>
                             {% endif %}
                         </div>                        {% endif %}
-                        {% if track_metadata[t] and track_metadata[t].get('score_filename') %}
-                        <a href="{{ url_for('score_file', filename=track_metadata[t]['score_filename']) }}" 
-                           class="score-download-btn" 
+                        <a href="{{ url_for('score', basename=t.rsplit('.', 1)[0]) }}"
+                           class="score-download-btn"
                            target="_blank"
-                           title="Download PDF score">
-                            📄 Download Score
+                           title="View score">
+                            🎼 View Score
                         </a>
-                        {% endif %}
                         <audio controls preload="none" src="{{ url_for('uploaded_file', filename=t) }}"></audio><div class="rating-form">
                             <input type="hidden" name="filenames" value="{{ t }}">
                             <div class="rating-section">
@@ -1290,9 +1252,30 @@ SCORE_PAGE_HTML = """
             const cursor = osmd.cursor;
             cursor.show();
             const audio = document.getElementById('player');
+            const timestamps = [];
+            const it = cursor.Iterator;
+            cursor.reset();
+            timestamps.push(0);
+            while (!it.EndReached) {
+                it.moveToNext();
+                timestamps.push(it.CurrentSourceTimestamp.RealValue);
+            }
+            const total = timestamps[timestamps.length - 1];
+            let secs = [];
+            audio.addEventListener('loadedmetadata', () => {
+                const ratio = audio.duration / total;
+                secs = timestamps.map(t => t * ratio);
+            });
+            let idx = 0;
             audio.addEventListener('timeupdate', () => {
-                cursor.goToTime(audio.currentTime * 1000);
-                cursor.update();
+                while (idx < secs.length - 1 && audio.currentTime >= secs[idx + 1]) {
+                    cursor.next();
+                    idx++;
+                }
+            });
+            audio.addEventListener('ended', () => {
+                cursor.reset();
+                idx = 0;
             });
         });
     </script>
@@ -1425,8 +1408,6 @@ def rate():
 
 # ---------------------------------------------------------------------------
 # Static serving of uploaded files
-# Static serving of uploaded mp3s and PDF scores
-# ---------------------------------------------------------------------------
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
@@ -1435,12 +1416,6 @@ def uploaded_file(filename):
 @app.route("/score/<basename>")
 def score(basename):
     return render_template_string(SCORE_PAGE_HTML, base=basename)
-
-@app.route("/scores/<path:filename>")
-def score_file(filename):
-    return send_from_directory(str(SCORES_FOLDER), filename)
-
-# Redirect root → rating page
 @app.route("/")
 def index():
     return redirect(url_for("rate"))
