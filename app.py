@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-A *single‑file* Flask app to run on a Raspberry Pi that lets you
-1. **Upload MP3 files** at `http://<pi‑ip>:5000/upload` (password‑protected)
-2. **Rate** the uploaded tracks 1 – 10 at `http://<pi‑ip>:5000/rate` (open)
+A *single-file* Flask app to run on a Raspberry Pi that lets you
+1. **Upload MuseScore `mscz` files** at `http://<pi‑ip>:5000/upload` (password-protected)
+2. **Rate** the converted tracks 1–10 at `http://<pi‑ip>:5000/rate` (open)
 
 Quick start (on RasPi OS / Debian):
 
@@ -19,7 +19,7 @@ Then browse to:
   • Upload page ……   http://<pi‑ip>:5000/upload  (password required)
   • Rating page ……   http://<pi‑ip>:5000/rate
 
-All MP3s are saved in   `uploads/`
+All converted files are saved in `uploads/` as `.ogg` and `.musicxml`
 All ratings are appended to `ratings.csv`             (CSV columns: timestamp,filename,score,ip,email,remark)
 
 You can analyse the CSV later with pandas / Excel.
@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import os
+import subprocess
 from pathlib import Path
 
 from flask import (Flask, render_template_string, request,
@@ -41,9 +42,11 @@ from werkzeug.utils import secure_filename
 UPLOAD_FOLDER = Path(__file__).parent / "uploads"
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
+ALLOWED_EXTENSIONS = {"mscz"}
 ALLOWED_EXTENSIONS = {"mp3"}
 ALLOWED_PDF_EXTENSIONS = {"pdf"}
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "changeme")
+MUSESCORE_BIN = os.environ.get("MUSESCORE_BIN", "musescore")
 RATINGS_CSV = Path(__file__).parent / "ratings.csv"
 METADATA_CSV = Path(__file__).parent / "metadata.csv"
 SCORES_FOLDER = Path(__file__).parent / "scores"
@@ -257,7 +260,7 @@ UPLOAD_FORM_HTML = """
 </head>
 <body>
     <div class="container">
-        <h2>🎵 Upload MP3s</h2>
+        <h2>🎵 Upload Scores</h2>
         <form method="post" enctype="multipart/form-data">            <div class="form-group">
                 <label for="password">Password:</label>
                 <input type="password" id="password" name="password" required>
@@ -311,6 +314,27 @@ def upload():
                 message = "Score file must be a PDF."
             else:
                 filename = secure_filename(file.filename)
+                mscz_path = UPLOAD_FOLDER / filename
+                file.save(mscz_path)
+
+                base = mscz_path.stem
+                ogg_path = UPLOAD_FOLDER / f"{base}.ogg"
+                xml_path = UPLOAD_FOLDER / f"{base}.musicxml"
+                try:
+                    subprocess.run([MUSESCORE_BIN, str(mscz_path), "-o", str(ogg_path)], check=True)
+                    subprocess.run([MUSESCORE_BIN, str(mscz_path), "-o", str(xml_path)], check=True)
+                except Exception as e:
+                    message = f"Conversion failed: {e}"
+                else:
+                    # Save metadata if any fields are provided
+                    model_name = request.form.get("model_name", "").strip()
+                    composer = request.form.get("composer", "").strip()
+                    piece_name = request.form.get("piece_name", "").strip()
+
+                    if model_name or composer or piece_name:
+                        save_metadata(ogg_path.name, model_name, composer, piece_name)
+
+                    message = f"✔ Uploaded {filename}"
                 file.save(UPLOAD_FOLDER / filename)
                 
                 # Handle score file upload
@@ -554,6 +578,21 @@ RATING_PAGE_HTML = """
             width: 100%;
             margin-bottom: 20px;
             border-radius: 8px;
+        }
+
+        .score-btn {
+            display: inline-block;
+            margin: 10px 0;
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+
+        .score-btn:hover {
+            background: #5a67d8;
         }
           .rating-form {
             display: flex;
@@ -949,7 +988,7 @@ RATING_PAGE_HTML = """
                     {% if total_tracks > 0 %}
                         🎉 Great job! You've rated all {{ total_tracks }} tracks. Thanks for your participation!
                     {% else %}
-                        No MP3s uploaded yet. Upload some tracks to get started!
+                        No scores uploaded yet. Upload some to get started!
                     {% endif %}
                 </div>            {% else %}
                 <form method="post" id="batchRatingForm">
@@ -1233,6 +1272,34 @@ THANKS_HTML = """
 </html>
 """
 
+SCORE_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\">
+    <title>Score View</title>
+    <script src=\"https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.7.6/build/opensheetmusicdisplay.min.js\"></script>
+</head>
+<body>
+    <div id=\"osmd-container\"></div>
+    <audio id=\"player\" controls src=\"{{ url_for('uploaded_file', filename=base + '.ogg') }}\"></audio>
+    <script>
+        const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("osmd-container", {followCursor: true});
+        osmd.load("{{ url_for('uploaded_file', filename=base + '.musicxml') }}").then(() => {
+            osmd.render();
+            const cursor = osmd.cursor;
+            cursor.show();
+            const audio = document.getElementById('player');
+            audio.addEventListener('timeupdate', () => {
+                cursor.goToTime(audio.currentTime * 1000);
+                cursor.update();
+            });
+        });
+    </script>
+</body>
+</html>
+"""
+
 @app.route("/rate", methods=["GET", "POST"])
 def rate():
     if request.method == "POST":
@@ -1287,7 +1354,7 @@ def rate():
     if error == "no_ratings":
         error_message = "Please rate at least one track before submitting."
       # Get all tracks and filter by user's unrated tracks
-    all_tracks = sorted(f.name for f in UPLOAD_FOLDER.glob("*.mp3"))
+    all_tracks = sorted(f.name for f in UPLOAD_FOLDER.glob("*.ogg"))
     
     if user_email:
         # Get tracks this user has already rated
@@ -1357,11 +1424,17 @@ def rate():
     )
 
 # ---------------------------------------------------------------------------
+# Static serving of uploaded files
 # Static serving of uploaded mp3s and PDF scores
 # ---------------------------------------------------------------------------
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+
+# Page to display score with OpenSheetMusicDisplay
+@app.route("/score/<basename>")
+def score(basename):
+    return render_template_string(SCORE_PAGE_HTML, base=basename)
 
 @app.route("/scores/<path:filename>")
 def score_file(filename):
