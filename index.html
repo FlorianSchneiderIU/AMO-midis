@@ -18,7 +18,7 @@
 
   <script>
     /* fetch the current file list that build.js writes */
-    fetch('mp3s/list.json')
+    fetch('ogg/list.json')
       .then(r => r.json())
       .then(files => {
         const root = document.getElementById('list');
@@ -26,7 +26,7 @@
           root.insertAdjacentHTML('beforeend', `
             <section>
               <h3>${file}</h3>
-              <audio controls preload="none" src="mp3s/${file}"></audio>
+              <audio controls preload="none" src="ogg/${file}"></audio>
               <form name="${file}" data-netlify="true">
                 <fieldset>
                   <legend>Rate (1–10)</legend>
