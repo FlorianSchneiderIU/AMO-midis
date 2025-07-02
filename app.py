@@ -1252,9 +1252,30 @@ SCORE_PAGE_HTML = """
             const cursor = osmd.cursor;
             cursor.show();
             const audio = document.getElementById('player');
+            const timestamps = [];
+            const it = cursor.Iterator;
+            cursor.reset();
+            timestamps.push(0);
+            while (!it.EndReached) {
+                it.moveToNext();
+                timestamps.push(it.CurrentSourceTimestamp.RealValue);
+            }
+            const total = timestamps[timestamps.length - 1];
+            let secs = [];
+            audio.addEventListener('loadedmetadata', () => {
+                const ratio = audio.duration / total;
+                secs = timestamps.map(t => t * ratio);
+            });
+            let idx = 0;
             audio.addEventListener('timeupdate', () => {
-                cursor.goToTime(audio.currentTime * 1000);
-                cursor.update();
+                while (idx < secs.length - 1 && audio.currentTime >= secs[idx + 1]) {
+                    cursor.next();
+                    idx++;
+                }
+            });
+            audio.addEventListener('ended', () => {
+                cursor.reset();
+                idx = 0;
             });
         });
     </script>
