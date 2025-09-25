@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -47,6 +48,7 @@ PASSWORD = os.environ.get("UPLOAD_PASSWORD", "changeme")
 MUSESCORE_BIN = os.environ.get("MUSESCORE_BIN", r"C:\ProgrammeNoAdmin\MuseScorePortable\App\MuseScore\bin\MuseScore4.exe")
 RATINGS_CSV = Path(__file__).parent / "ratings.csv"
 METADATA_CSV = Path(__file__).parent / "metadata.csv"
+ARENA_MATCHES_CSV = Path(__file__).parent / "model_arena_matches.csv"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max file size
@@ -95,7 +97,7 @@ def get_user_rated_tracks(email: str) -> set[str]:
     """Get the set of filenames that a user has already rated."""
     if not RATINGS_CSV.exists():
         return set()
-    
+
     rated_tracks = set()
     with RATINGS_CSV.open("r", newline="") as f:
         reader = csv.reader(f)
@@ -121,8 +123,134 @@ def get_user_rated_tracks(email: str) -> set[str]:
                 if row_email.lower() == email.lower():
                     rated_tracks.add(row[filename_idx])
             # If there's no email column, skip this row (old format)
-            
+
     return rated_tracks
+
+
+def save_model_arena_match(
+    *,
+    email: str,
+    piece_key: str,
+    piece_label: str,
+    track_a: str,
+    track_b: str,
+    model_a: str,
+    model_b: str,
+    chosen_label: str,
+    chosen_track: str,
+    chosen_model: str,
+    feedback: str,
+    ip: str,
+) -> None:
+    """Persist the result of a model arena comparison."""
+
+    new = not ARENA_MATCHES_CSV.exists()
+    with ARENA_MATCHES_CSV.open("a", newline="") as f:
+        writer = csv.writer(f)
+        if new:
+            writer.writerow(
+                [
+                    "timestamp",
+                    "email",
+                    "piece_key",
+                    "piece_label",
+                    "track_a",
+                    "track_b",
+                    "model_a",
+                    "model_b",
+                    "winner_label",
+                    "winner_track",
+                    "winner_model",
+                    "feedback",
+                    "ip",
+                ]
+            )
+        writer.writerow(
+            [
+                dt.datetime.utcnow().isoformat(),
+                email,
+                piece_key,
+                piece_label,
+                track_a,
+                track_b,
+                model_a,
+                model_b,
+                chosen_label,
+                chosen_track,
+                chosen_model,
+                feedback,
+                ip,
+            ]
+        )
+
+
+def _derive_piece_identity(filename: str, metadata: dict) -> tuple[str, str, str, str]:
+    """Return (key, display_label, piece_name, composer) for grouping tracks."""
+
+    piece_name = (metadata.get("piece_name") or metadata.get("score_filename") or "").strip()
+    composer = (metadata.get("composer") or "").strip()
+
+    if piece_name and composer:
+        key = f"composer::{composer}|piece::{piece_name}"
+        display_label = f"{composer} — {piece_name}"
+    elif piece_name:
+        key = f"piece::{piece_name}"
+        display_label = piece_name
+    elif composer:
+        key = f"composer_only::{composer}"
+        display_label = composer
+    else:
+        stem = Path(filename).stem
+        key = f"file::{stem}"
+        display_label = stem
+        piece_name = stem
+
+    return key, display_label, piece_name, composer
+
+
+def collect_piece_groups() -> dict[str, dict]:
+    """Group available tracks by piece identity for the model arena."""
+
+    groups: dict[str, dict] = {}
+    for ogg_file in sorted(UPLOAD_FOLDER.glob("*.ogg")):
+        filename = ogg_file.name
+        metadata = get_file_metadata(filename)
+        key, display_label, piece_name, composer = _derive_piece_identity(filename, metadata)
+        model_name = (metadata.get("model_name") or "").strip()
+
+        entry = {
+            "filename": filename,
+            "metadata": metadata,
+            "model_name": model_name,
+            "piece_name": piece_name,
+            "composer": composer,
+        }
+
+        group = groups.setdefault(
+            key,
+            {
+                "tracks": [],
+                "display_label": display_label,
+                "piece_name": piece_name,
+                "composer": composer,
+            },
+        )
+
+        group["tracks"].append(entry)
+
+        # Keep the richest available label information.
+        if composer and piece_name:
+            group["display_label"] = f"{composer} — {piece_name}"
+        elif piece_name and not group.get("display_label"):
+            group["display_label"] = piece_name
+
+        if composer and not group.get("composer"):
+            group["composer"] = composer
+        if piece_name and not group.get("piece_name"):
+            group["piece_name"] = piece_name
+
+    # Retain only groups with at least two tracks for comparison.
+    return {key: data for key, data in groups.items() if len(data["tracks"]) >= 2}
 
 # ---------------------------------------------------------------------------
 # Routes — File upload (password protected)
@@ -434,6 +562,43 @@ RATING_PAGE_HTML = """
             background: #e6fffa;
             border-radius: 8px;
             border-left: 4px solid #38b2ac;
+        }
+
+        .arena-invite {
+            margin-top: 20px;
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 15px 35px rgba(102, 126, 234, 0.2);
+            text-align: center;
+        }
+
+        .arena-invite h3 {
+            color: #4c51bf;
+            font-size: 1.4rem;
+            margin-bottom: 8px;
+        }
+
+        .arena-invite p {
+            color: #4a5568;
+            margin-bottom: 16px;
+        }
+
+        .arena-button {
+            display: inline-block;
+            padding: 12px 28px;
+            border-radius: 999px;
+            background: linear-gradient(135deg, #805ad5 0%, #667eea 100%);
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .arena-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(128, 90, 213, 0.3);
         }
         
         .no-tracks {
@@ -935,7 +1100,8 @@ RATING_PAGE_HTML = """
                     </div>
                     <button type="submit" class="email-btn">Start Rating</button>
                 </form>
-            {% else %}                <div class="current-user">
+            {% else %}
+                <div class="current-user">
                     👤 Rating as: {{ user_email }}
                     <a href="{{ url_for('rate') }}" style="margin-left: 15px; color: #667eea; text-decoration: none;">Change User</a>
                 </div>
@@ -946,6 +1112,14 @@ RATING_PAGE_HTML = """
                 {% endif %}
             {% endif %}
         </div>
+
+        {% if user_email %}
+        <div class="arena-invite">
+            <h3>⚔️ Try the Model Arena</h3>
+            <p>Blind-test two model performances of the same song and tell us which one wins.</p>
+            <a class="arena-button" href="{{ url_for('arena', email=user_email) }}">Enter Model Arena</a>
+        </div>
+        {% endif %}
           {% if user_email %}
             {% if not tracks %}
                 <div class="no-tracks">
@@ -1152,6 +1326,338 @@ RATING_PAGE_HTML = """
             }
         }
     </script>
+</body>
+</html>
+"""
+
+
+ARENA_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+    <title>Model Arena</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #5a67d8 0%, #805ad5 100%);
+            min-height: 100vh;
+            padding: 30px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.15);
+        }
+
+        h1 {
+            font-size: 2.8rem;
+            margin-bottom: 10px;
+            text-align: center;
+            color: #2d3748;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #4a5568;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+        }
+
+        .message {
+            background: #e6fffa;
+            color: #2c7a7b;
+            border-left: 4px solid #38b2ac;
+            padding: 15px 20px;
+            border-radius: 12px;
+            margin-bottom: 25px;
+        }
+
+        .email-card, .arena-card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.12);
+        }
+
+        .email-form {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .email-form label {
+            width: 100%;
+            color: #4a5568;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .email-form input[type=\"email\"] {
+            flex: 1;
+            min-width: 260px;
+            padding: 14px 18px;
+            border-radius: 12px;
+            border: 2px solid #e2e8f0;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .email-form input[type=\"email\"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        }
+
+        .email-form button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 14px 26px;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .email-form button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(102, 126, 234, 0.25);
+        }
+
+        .arena-card {
+            margin-top: 30px;
+        }
+
+        .audio-comparison {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .audio-panel {
+            background: #f7fafc;
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            border: 2px solid transparent;
+        }
+
+        .audio-panel h2 {
+            font-size: 1.5rem;
+            color: #2d3748;
+            text-align: center;
+        }
+
+        .audio-panel audio {
+            width: 100%;
+            outline: none;
+        }
+
+        .choice-grid {
+            display: grid;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .choice-option {
+            border: 2px solid #cbd5f5;
+            padding: 18px;
+            border-radius: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .choice-option input[type=\"radio\"] {
+            width: 20px;
+            height: 20px;
+        }
+
+        .choice-option:hover {
+            border-color: #667eea;
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.15);
+        }
+
+        .feedback-label {
+            font-weight: 600;
+            color: #4a5568;
+            margin-bottom: 10px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            border-radius: 14px;
+            border: 2px solid #e2e8f0;
+            padding: 14px 16px;
+            font-size: 1rem;
+            resize: vertical;
+            transition: border 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        }
+
+        .action-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 25px;
+        }
+
+        .action-buttons button {
+            flex: 1;
+            min-width: 200px;
+            border: none;
+            border-radius: 12px;
+            padding: 16px;
+            font-weight: 600;
+            color: white;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .action-buttons button.primary {
+            background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
+        }
+
+        .action-buttons button.secondary {
+            background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+        }
+
+        .action-buttons button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
+        }
+
+        .nav-link {
+            display: inline-block;
+            margin-top: 30px;
+            text-align: center;
+            width: 100%;
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .nav-link:hover {
+            color: #764ba2;
+        }
+
+        .no-pairs {
+            text-align: center;
+            color: #4a5568;
+            font-size: 1.1rem;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 20px 15px;
+            }
+
+            .container {
+                padding: 28px 22px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"container\">
+        <h1>Model Arena</h1>
+        <p class=\"subtitle\">Blind A/B comparisons to find the stronger model for each song.</p>
+
+        {% if message %}
+        <div class=\"message\">{{ message }}</div>
+        {% endif %}
+
+        {% if not user_email %}
+        <div class=\"email-card\">
+            <form class=\"email-form\" method=\"get\">
+                <label for=\"email\">Enter your email to join the arena:</label>
+                <input type=\"email\" id=\"email\" name=\"email\" placeholder=\"you@example.com\" required>
+                <button type=\"submit\">Start Testing</button>
+            </form>
+        </div>
+        {% elif not has_pair %}
+        <div class=\"arena-card\">
+            <p class=\"no-pairs\">We need at least two arrangements of the same song to run a match. Upload more models to continue.</p>
+        </div>
+        {% else %}
+        <div class=\"arena-card\">
+            <div class=\"audio-comparison\">
+                <div class=\"audio-panel\">
+                    <h2>Model A</h2>
+                    <audio controls preload=\"metadata\">
+                        <source src=\"{{ audio_a }}\" type=\"audio/ogg\">
+                        Your browser does not support the audio element.
+                    </audio>
+                </div>
+                <div class=\"audio-panel\">
+                    <h2>Model B</h2>
+                    <audio controls preload=\"metadata\">
+                        <source src=\"{{ audio_b }}\" type=\"audio/ogg\">
+                        Your browser does not support the audio element.
+                    </audio>
+                </div>
+            </div>
+
+            <form method=\"post\">
+                <input type=\"hidden\" name=\"email\" value=\"{{ user_email }}\">
+                <input type=\"hidden\" name=\"piece_key\" value=\"{{ piece_key }}\">
+                <input type=\"hidden\" name=\"piece_label\" value=\"{{ piece_label }}\">
+                <input type=\"hidden\" name=\"track_a\" value=\"{{ track_a }}\">
+                <input type=\"hidden\" name=\"track_b\" value=\"{{ track_b }}\">
+                <input type=\"hidden\" name=\"model_a\" value=\"{{ model_a }}\">
+                <input type=\"hidden\" name=\"model_b\" value=\"{{ model_b }}\">
+
+                <div class=\"choice-grid\">
+                    <label class=\"choice-option\">
+                        <input type=\"radio\" name=\"winner\" value=\"A\" required>
+                        <span>Model A sounds better</span>
+                    </label>
+                    <label class=\"choice-option\">
+                        <input type=\"radio\" name=\"winner\" value=\"B\" required>
+                        <span>Model B sounds better</span>
+                    </label>
+                </div>
+
+                <p class=\"feedback-label\">Why did the winner feel better? Share any details that stood out.</p>
+                <textarea name=\"feedback\" placeholder=\"Describe tone, dynamics, phrasing, mistakes…\"></textarea>
+
+                <div class=\"action-buttons\">
+                    <button type=\"submit\" name=\"next_action\" value=\"new\" class=\"primary\">Submit &amp; New Song</button>
+                    <button type=\"submit\" name=\"next_action\" value=\"same\" class=\"secondary\">Submit &amp; Same Song</button>
+                </div>
+            </form>
+        </div>
+        {% endif %}
+
+        <a class=\"nav-link\" href=\"{{ url_for('rate', email=user_email) }}\">Back to track ratings</a>
+    </div>
 </body>
 </html>
 """
@@ -1423,8 +1929,8 @@ def rate():
         tracks.sort()
 
     return render_template_string(
-        RATING_PAGE_HTML, 
-        tracks=tracks, 
+        RATING_PAGE_HTML,
+        tracks=tracks,
         user_email=user_email,
         total_tracks=len(all_tracks),
         track_metadata=track_metadata,
@@ -1433,6 +1939,102 @@ def rate():
         all_pieces=sorted(all_pieces),
         all_models=sorted(all_models)
     )
+
+
+@app.route("/arena", methods=["GET", "POST"])
+def arena():
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip()
+        if not email:
+            abort(400)
+
+        piece_key = request.form.get("piece_key", "")
+        piece_label = request.form.get("piece_label", "")
+        track_a = request.form.get("track_a")
+        track_b = request.form.get("track_b")
+        model_a = request.form.get("model_a", "")
+        model_b = request.form.get("model_b", "")
+        winner = request.form.get("winner")
+        feedback = (request.form.get("feedback") or "").strip()
+        next_action = request.form.get("next_action", "new")
+
+        if winner not in {"A", "B"} or not track_a or not track_b:
+            abort(400)
+
+        chosen_track = track_a if winner == "A" else track_b
+        chosen_model = model_a if winner == "A" else model_b
+
+        save_model_arena_match(
+            email=email,
+            piece_key=piece_key,
+            piece_label=piece_label,
+            track_a=track_a,
+            track_b=track_b,
+            model_a=model_a,
+            model_b=model_b,
+            chosen_label=winner,
+            chosen_track=chosen_track,
+            chosen_model=chosen_model,
+            feedback=feedback,
+            ip=request.remote_addr or "-",
+        )
+
+        if next_action == "same" and piece_key:
+            return redirect(url_for("arena", email=email, piece=piece_key, status="recorded"))
+
+        return redirect(url_for("arena", email=email, status="recorded"))
+
+    user_email = (request.args.get("email") or "").strip()
+    status = request.args.get("status")
+    message = ""
+    if status == "recorded":
+        message = "Match recorded! Ready for another comparison."
+
+    piece_groups = collect_piece_groups()
+    has_pair = bool(piece_groups)
+
+    piece_key = request.args.get("piece") or ""
+    selected_group = None
+
+    if user_email and has_pair:
+        if piece_key and piece_key in piece_groups:
+            selected_group = piece_groups[piece_key]
+        else:
+            piece_key = ""
+
+        if not selected_group:
+            piece_key, selected_group = random.choice(list(piece_groups.items()))
+
+        tracks = selected_group["tracks"]
+        first, second = random.sample(tracks, 2)
+        if random.choice([True, False]):
+            track_a = first
+            track_b = second
+        else:
+            track_a = second
+            track_b = first
+
+        context = {
+            "user_email": user_email,
+            "has_pair": True,
+            "audio_a": url_for("uploaded_file", filename=track_a["filename"]),
+            "audio_b": url_for("uploaded_file", filename=track_b["filename"]),
+            "track_a": track_a["filename"],
+            "track_b": track_b["filename"],
+            "model_a": track_a.get("model_name", ""),
+            "model_b": track_b.get("model_name", ""),
+            "piece_key": piece_key,
+            "piece_label": selected_group.get("display_label", ""),
+            "message": message,
+        }
+    else:
+        context = {
+            "user_email": user_email,
+            "has_pair": False,
+            "message": message,
+        }
+
+    return render_template_string(ARENA_PAGE_HTML, **context)
 
 # ---------------------------------------------------------------------------
 # Static serving of uploaded files
