@@ -44,7 +44,7 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"mscz"}
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "changeme")
-MUSESCORE_BIN = os.environ.get("MUSESCORE_BIN", "musescore")
+MUSESCORE_BIN = os.environ.get("MUSESCORE_BIN", r"C:\ProgrammeNoAdmin\MuseScorePortable\App\MuseScore\bin\MuseScore4.exe")
 RATINGS_CSV = Path(__file__).parent / "ratings.csv"
 METADATA_CSV = Path(__file__).parent / "metadata.csv"
 
@@ -1236,49 +1236,77 @@ THANKS_HTML = """
 
 SCORE_PAGE_HTML = """
 <!DOCTYPE html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-    <meta charset=\"UTF-8\">
-    <title>Score View</title>
-    <script src=\"https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.7.6/build/opensheetmusicdisplay.min.js\"></script>
+  <meta charset="UTF-8" />
+  <title>Score View</title>
+
+  <!-- Open-source OSMD (no sponsor build needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.9.0/build/opensheetmusicdisplay.min.js"></script>
+
+  <!-- Tiny MIDI parser that keeps tempo-map information -->
+  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.27/build/Midi.min.js"></script>
+
+  <style>
+    body{margin:0;font-family:sans-serif}
+    #osmd-container{width:100%;overflow-x:auto}
+    audio{width:100%;margin-top:.5rem}
+  </style>
 </head>
 <body>
-    <div id=\"osmd-container\"></div>
-    <audio id=\"player\" controls src=\"{{ url_for('uploaded_file', filename=base + '.ogg') }}\"></audio>
-    <script>
-        const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("osmd-container", {followCursor: true});
-        osmd.load("{{ url_for('uploaded_file', filename=base + '.musicxml') }}").then(() => {
-            osmd.render();
-            const cursor = osmd.cursor;
-            cursor.show();
-            const audio = document.getElementById('player');
-            const timestamps = [];
-            const it = cursor.Iterator;
-            cursor.reset();
-            timestamps.push(0);
-            while (!it.EndReached) {
-                it.moveToNext();
-                timestamps.push(it.CurrentSourceTimestamp.RealValue);
-            }
-            const total = timestamps[timestamps.length - 1];
-            let secs = [];
-            audio.addEventListener('loadedmetadata', () => {
-                const ratio = audio.duration / total;
-                secs = timestamps.map(t => t * ratio);
-            });
-            let idx = 0;
-            audio.addEventListener('timeupdate', () => {
-                while (idx < secs.length - 1 && audio.currentTime >= secs[idx + 1]) {
-                    cursor.next();
-                    idx++;
-                }
-            });
-            audio.addEventListener('ended', () => {
-                cursor.reset();
-                idx = 0;
-            });
-        });
-    </script>
+  <div id="osmd-container"></div>
+  <audio id="player" controls
+         src="{{ url_for('uploaded_file', filename=base + '.ogg') }}">
+  </audio>
+
+  <script type="module">
+    /************ 1.  Render the score ************/
+    const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(
+        "osmd-container", {followCursor:true});
+    await osmd.load("{{ url_for('uploaded_file', filename=base + '.musicxml') }}");
+    await osmd.render();
+
+    /************ 2.  Build a timing table from the MIDI ************/
+    const midiAB = await fetch("{{ url_for('uploaded_file', filename=base + '.mid') }}")
+                         .then(r => r.arrayBuffer());
+    const midi    = new Midi(midiAB);              // Tone.js-MIDI parser
+    const noteOns = [];
+    midi.tracks.forEach(t => t.notes.forEach(n => noteOns.push(n.time)));
+    noteOns.sort((a,b)=>a-b);                      // seconds, already tempo-aware
+    /* de-dup (chords) */
+    const secs = noteOns.filter((v,i,arr)=> i===0 || v!==arr[i-1]);
+
+    /************ 3.  Absolute cursor sync (no drift, seek-safe) ************/
+    const audio  = document.getElementById('player');
+    const cursor = osmd.cursor;
+    let lastIdx  = -1;
+
+    /* binary search: position in secs[] for a given time */
+    function indexFor(time){
+      let lo=0, hi=secs.length-1;
+      while(lo<hi){
+        const mid=(lo+hi+1)>>1;
+        secs[mid]<=time ? lo=mid : hi=mid-1;
+      }
+      return lo;
+    }
+
+    function jump(i){
+      if(i===lastIdx) return;
+      cursor.reset(); cursor.show();
+      for(let k=0;k<i;k++) cursor.next();
+      lastIdx=i;
+    }
+
+    function raf(){
+      jump(indexFor(audio.currentTime));
+      if(!audio.paused && !audio.ended) requestAnimationFrame(raf);
+    }
+
+    audio.addEventListener('play',   ()=>requestAnimationFrame(raf));
+    audio.addEventListener('seeked', ()=>jump(indexFor(audio.currentTime)));
+    audio.addEventListener('ended',  ()=>{cursor.reset(); lastIdx=-1;});
+  </script>
 </body>
 </html>
 """

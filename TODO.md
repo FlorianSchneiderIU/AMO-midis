@@ -1,0 +1,2 @@
+- Switch to https://pypi.org/project/verovio/
+- Model battle arena (A/B tests - which do you prefer?)
